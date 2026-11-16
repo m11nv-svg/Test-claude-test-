@@ -81,7 +81,34 @@ jobs:
           path: out/final.mp4
           retention-days: 3
 
-      - name: Send video to Telegram
+      - name: Send video to Telegram through Make
         env:
-          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: python render/notify.py job.json out/final.mp4
+          MAKE_VIDEO_WEBHOOK_URL: ${{ secrets.MAKE_VIDEO_WEBHOOK_URL }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import requests
+
+          webhook_url = os.environ.get("MAKE_VIDEO_WEBHOOK_URL", "").strip()
+          if not webhook_url:
+              raise SystemExit("Missing GitHub Actions secret MAKE_VIDEO_WEBHOOK_URL")
+
+          with open("job.json", encoding="utf-8") as job_file:
+              job = json.load(job_file)
+
+          with open("out/final.mp4", "rb") as video_file:
+              response = requests.post(
+                  webhook_url,
+                  data={
+                      "chat_id": str(job["chat_id"]),
+                      "caption": job.get("title", "الفيديو جاهز للمراجعة"),
+                  },
+                  files={"video": ("final.mp4", video_file, "video/mp4")},
+                  timeout=300,
+              )
+
+          print(f"Make video-delivery webhook: HTTP {response.status_code}")
+          print(response.text[:1000])
+          response.raise_for_status()
+          PY
