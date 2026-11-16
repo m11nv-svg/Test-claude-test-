@@ -57,45 +57,70 @@ def download_valid_image(url, path):
 
 
 def commons_image(prompt, path):
-    stop = {"cinematic", "wide", "shot", "medium", "close", "up", "dramatic", "vertical", "logos", "text", "image", "scene", "ancient", "with", "from", "into", "above", "over", "under", "through", "that", "this", "their", "they", "standing", "looking"}
+    stop = {"cinematic", "wide", "shot", "medium", "close", "dramatic", "vertical", "logos", "text", "image", "scene", "with", "from", "into", "above", "over", "under", "through", "that", "this", "their", "they", "standing", "looking", "ancient"}
     words = re.findall(r"[A-Za-z]{4,}", prompt.lower())
     keywords = []
     for word in words:
         if word not in stop and word not in keywords:
             keywords.append(word)
-        if len(keywords) == 6:
-            break
-    query = " ".join(keywords) or "desert landscape"
-    params = {
-        "action": "query",
-        "generator": "search",
-        "gsrsearch": f"filetype:bitmap {query}",
-        "gsrnamespace": 6,
-        "gsrlimit": 12,
-        "prop": "imageinfo",
-        "iiprop": "url|mime",
-        "iiurlwidth": W,
-        "format": "json",
-    }
-    result = requests.get("https://commons.wikimedia.org/w/api.php", params=params, headers=HEADERS, timeout=45)
-    result.raise_for_status()
-    pages = result.json().get("query", {}).get("pages", {})
-    errors = []
-    for page in pages.values():
-        info = (page.get("imageinfo") or [{}])[0]
-        if info.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
+
+    # Commons search is AND-based, so progressively broaden the query.
+    queries = []
+    if len(keywords) >= 2:
+        queries.extend([" ".join(keywords[:2]), " ".join(keywords[1:3])])
+    queries.extend(keywords[:6])
+    queries.extend(["ancient architecture", "desert landscape", "sandstorm", "oasis"])
+    seen = set()
+
+    for query in queries:
+        query = query.strip()
+        if not query or query in seen:
             continue
-        image_url = info.get("thumburl") or info.get("url")
-        if not image_url:
+        seen.add(query)
+        search_params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": f"filetype:bitmap {query}",
+            "srnamespace": 6,
+            "srlimit": 10,
+            "format": "json",
+        }
+        search_response = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params=search_params, headers=HEADERS, timeout=45
+        )
+        search_response.raise_for_status()
+        titles = [item.get("title") for item in search_response.json().get("query", {}).get("search", []) if item.get("title")]
+        if not titles:
             continue
-        try:
-            download_valid_image(image_url, path)
-            print(f"IMAGE_SOURCE= Wikimedia Commons; file={page.get('title', 'unknown')}")
-            return True
-        except Exception as exc:
-            errors.append(str(exc))
-    if errors:
-        print("Wikimedia candidate download errors: " + "; ".join(errors[:3]))
+
+        info_params = {
+            "action": "query",
+            "titles": "|".join(titles),
+            "prop": "imageinfo",
+            "iiprop": "url|mime",
+            "iiurlwidth": W,
+            "format": "json",
+        }
+        info_response = requests.get(
+            "https://commons.wikimedia.org/w/api.php",
+            params=info_params, headers=HEADERS, timeout=45
+        )
+        info_response.raise_for_status()
+        pages = info_response.json().get("query", {}).get("pages", {})
+        for page in pages.values():
+            info = (page.get("imageinfo") or [{}])[0]
+            if info.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
+                continue
+            image_url = info.get("thumburl") or info.get("url")
+            if not image_url:
+                continue
+            try:
+                download_valid_image(image_url, path)
+                print(f"IMAGE_SOURCE=Wikimedia Commons; query={query}; file={page.get('title', 'unknown')}")
+                return True
+            except Exception as exc:
+                print(f"Skipping Commons image {page.get('title', 'unknown')}: {exc}")
     return False
 
 
