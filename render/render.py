@@ -64,11 +64,10 @@ def commons_image(prompt, path):
         if word not in stop and word not in keywords:
             keywords.append(word)
 
-    # Commons search is AND-based, so progressively broaden the query.
     queries = []
     if len(keywords) >= 2:
         queries.extend([" ".join(keywords[:2]), " ".join(keywords[1:3])])
-    queries.extend(keywords[:6])
+    queries.extend(keywords[:8])
     queries.extend(["ancient architecture", "desert landscape", "sandstorm", "oasis"])
     seen = set()
 
@@ -80,9 +79,9 @@ def commons_image(prompt, path):
         search_params = {
             "action": "query",
             "list": "search",
-            "srsearch": f"filetype:bitmap {query}",
+            "srsearch": query,
             "srnamespace": 6,
-            "srlimit": 10,
+            "srlimit": 15,
             "format": "json",
         }
         search_response = requests.get(
