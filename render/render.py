@@ -1,4 +1,5 @@
-import asyncio
+import base64
+import wave
 import json
 import math
 import os
@@ -8,13 +9,14 @@ import sys
 import urllib.parse
 
 import requests
-import edge_tts
 from PIL import Image, ImageDraw, ImageFont
 import arabic_reshaper
 from bidi.algorithm import get_display
 
 W, H = 1080, 1920
-VOICE = "ar-EG-SalmaNeural"
+GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+GEMINI_TTS_VOICE = "Schedar"
+GEMINI_TTS_SAMPLE_RATE = 24000
 FONT = "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf"
 HEADERS = {"User-Agent": "ContentFactory/1.0 (https://github.com/m11nv-svg/Test-claude-test-)"}
 
@@ -183,8 +185,64 @@ def overlay(path, text):
     image.save(path)
 
 
-async def tts(text, path):
-    await edge_tts.Communicate(text, VOICE).save(path)
+def tts(text, path):
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Missing GEMINI_API_KEY GitHub Actions secret. "
+            "Add a Gemini API key from Google AI Studio before rendering."
+        )
+
+    prompt = (
+        "Read the following Arabic narration in a calm, warm, natural, "
+        "confident documentary style. Use measured pacing, gentle pauses, "
+        "clear Egyptian Arabic pronunciation, and restrained emotion. "
+        "Avoid exaggerated acting, shouting, or a robotic cadence.\n\n"
+        + text
+    )
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + GEMINI_TTS_MODEL + ":generateContent"
+    )
+    response = requests.post(
+        url,
+        params={"key": api_key},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": {"voiceName": GEMINI_TTS_VOICE}
+                    }
+                }
+            }
+        },
+        headers={"Content-Type": "application/json"},
+        timeout=180
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"Gemini TTS failed: HTTP {response.status_code}: {response.text[:1200]}"
+        )
+
+    payload = response.json()
+    parts = payload.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    audio_b64 = None
+    for part in parts:
+        inline = part.get("inlineData") or part.get("inline_data") or {}
+        if inline.get("data"):
+            audio_b64 = inline["data"]
+            break
+    if not audio_b64:
+        raise RuntimeError("Gemini TTS returned no audio data")
+
+    pcm = base64.b64decode(audio_b64)
+    with wave.open(path, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(GEMINI_TTS_SAMPLE_RATE)
+        wav.writeframes(pcm)
 
 
 def duration(path):
@@ -207,12 +265,12 @@ def main(job_path, output_path):
     for scene in job["scenes"]:
         number = scene["n"]
         image_path = f"work/{number}.png"
-        audio_path = f"work/{number}.mp3"
+        audio_path = f"work/{number}.wav"
         clip_path = f"work/{number}.mp4"
 
         get_image(scene["image_prompt_en"], image_path, number)
         overlay(image_path, scene["narration_ar"])
-        asyncio.run(tts(scene["narration_ar"], audio_path))
+        tts(scene["narration_ar"], audio_path)
 
         audio_duration = duration(audio_path)
         clip_duration = audio_duration + 0.4
@@ -220,6 +278,7 @@ def main(job_path, output_path):
             "ffmpeg", "-y", "-loop", "1", "-i", image_path, "-i", audio_path,
             "-t", str(clip_duration),
             "-vf", "zoompan=z='min(zoom+0.0008,1.15)':d=1:s=1080x1920:fps=30",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
             "-shortest", clip_path
         ])
