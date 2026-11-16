@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -15,6 +16,7 @@ from bidi.algorithm import get_display
 W, H = 1080, 1920
 VOICE = "ar-EG-SalmaNeural"
 FONT = "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf"
+HEADERS = {"User-Agent": "ContentFactory/1.0 (https://github.com/m11nv-svg/Test-claude-test-)"}
 
 
 def run(cmd):
@@ -43,20 +45,94 @@ def validate_job(job):
             raise ValueError(f"Scene {index} seconds must be a number from 2 to 20")
 
 
+def download_valid_image(url, path):
+    response = requests.get(url, headers=HEADERS, timeout=90)
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("image/"):
+        raise RuntimeError("The image provider returned a non-image response")
+    with open(path, "wb") as image_file:
+        image_file.write(response.content)
+    with Image.open(path) as image:
+        image.verify()
+
+
+def commons_image(prompt, path):
+    stop = {"cinematic", "wide", "shot", "medium", "close", "up", "dramatic", "vertical", "logos", "text", "image", "scene", "ancient", "with", "from", "into", "above", "over", "under", "through", "that", "this", "their", "they", "standing", "looking"}
+    words = re.findall(r"[A-Za-z]{4,}", prompt.lower())
+    keywords = []
+    for word in words:
+        if word not in stop and word not in keywords:
+            keywords.append(word)
+        if len(keywords) == 6:
+            break
+    query = " ".join(keywords) or "desert landscape"
+    params = {
+        "action": "query",
+        "generator": "search",
+        "gsrsearch": f"filetype:bitmap {query}",
+        "gsrnamespace": 6,
+        "gsrlimit": 12,
+        "prop": "imageinfo",
+        "iiprop": "url|mime",
+        "iiurlwidth": W,
+        "format": "json",
+    }
+    result = requests.get("https://commons.wikimedia.org/w/api.php", params=params, headers=HEADERS, timeout=45)
+    result.raise_for_status()
+    pages = result.json().get("query", {}).get("pages", {})
+    errors = []
+    for page in pages.values():
+        info = (page.get("imageinfo") or [{}])[0]
+        if info.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
+            continue
+        image_url = info.get("thumburl") or info.get("url")
+        if not image_url:
+            continue
+        try:
+            download_valid_image(image_url, path)
+            print(f"IMAGE_SOURCE= Wikimedia Commons; file={page.get('title', 'unknown')}")
+            return True
+        except Exception as exc:
+            errors.append(str(exc))
+    if errors:
+        print("Wikimedia candidate download errors: " + "; ".join(errors[:3]))
+    return False
+
+
 def get_image(prompt, path, n):
     url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) + f"?width={W}&height={H}&nologo=true&seed={n}"
     last_error = "unknown image service error"
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            response = requests.get(url, timeout=120)
+            response = requests.get(url, headers=HEADERS, timeout=90)
             if response.ok and response.headers.get("content-type", "").startswith("image/"):
                 with open(path, "wb") as image_file:
                     image_file.write(response.content)
+                with Image.open(path) as image:
+                    image.verify()
+                print(f"IMAGE_SOURCE=Pollinations; scene={n}")
                 return
             last_error = f"HTTP {response.status_code}; content-type={response.headers.get('content-type', 'missing')}"
+            if response.status_code in (402, 401, 403, 404):
+                break
         except requests.RequestException as exc:
             last_error = str(exc)
-    raise RuntimeError(f"Image generation failed for scene {n} after 3 attempts: {last_error}")
+
+    print(f"Primary image provider unavailable for scene {n}: {last_error}. Trying Wikimedia Commons.")
+    try:
+        if commons_image(prompt, path):
+            return
+    except Exception as exc:
+        print(f"Wikimedia Commons fallback error for scene {n}: {exc}")
+
+    keywords = re.sub(r"[^a-zA-Z0-9,]+", ",", prompt).strip(",")
+    fallback_url = f"https://loremflickr.com/{W}/{H}/{urllib.parse.quote(keywords)}"
+    try:
+        download_valid_image(fallback_url, path)
+        print(f"IMAGE_SOURCE=LoremFlickr fallback; scene={n}")
+        return
+    except Exception as exc:
+        raise RuntimeError(f"All image providers failed for scene {n}. Primary: {last_error}. Final fallback: {exc}") from exc
 
 
 def overlay(path, text):
