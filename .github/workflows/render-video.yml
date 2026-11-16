@@ -1,35 +1,87 @@
 name: Render Video
+
 on:
   repository_dispatch:
     types: [render-video]
   workflow_dispatch:
     inputs:
       job_json:
-        description: "JSON: {job_id, chat_id, title, scenes:[{n,narration_ar,image_prompt_en,seconds}]}"
+        description: "JSON job payload"
         required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-video-${{ github.event.client_payload.job_id || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - name: Install deps
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system and Python dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-ui-core
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-ui-core
+          python -m pip install --upgrade pip
           pip install -r render/requirements.txt
-      - name: Write job file
+
+      - name: Write job payload safely
         env:
-          PAYLOAD: ${{ toJson(github.event.client_payload) }}
-          INPUT: ${{ github.event.inputs.job_json }}
+          DISPATCH_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          MANUAL_INPUT: ${{ github.event.inputs.job_json }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ -n "$INPUT" ]; then echo "$INPUT" > job.json; else echo "$PAYLOAD" > job.json; fi
-      - name: Render
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          if os.environ["EVENT_NAME"] == "workflow_dispatch":
+              raw = os.environ.get("MANUAL_INPUT", "")
+              job = json.loads(raw)
+          else:
+              raw = os.environ.get("DISPATCH_PAYLOAD", "")
+              job = json.loads(raw)
+
+          if not isinstance(job, dict):
+              raise SystemExit("Job payload must be a JSON object")
+
+          Path("job.json").write_text(
+              json.dumps(job, ensure_ascii=False),
+              encoding="utf-8"
+          )
+          print("Job payload received and saved.")
+          PY
+
+      - name: Render video
         run: python render/render.py job.json out/final.mp4
-      - uses: actions/upload-artifact@v4
-        with: { name: final-video, path: out/final.mp4, retention-days: 3 }
-      - name: Send result to Telegram
+
+      - name: Verify MP4 output
+        run: |
+          test -s out/final.mp4
+          ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height -of json out/final.mp4
+          ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of json out/final.mp4
+
+      - name: Upload final video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: out/final.mp4
+          retention-days: 3
+
+      - name: Send video to Telegram
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: python render/notify.py job.json out/final.mp4
