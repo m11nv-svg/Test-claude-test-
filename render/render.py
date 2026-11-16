@@ -188,9 +188,18 @@ def tts(text, path):
                     "annotations": [{
                         "type": "speech_metadata",
                         "style": (
-                            "Calm, warm, mature documentary narration; "
-                            "measured pace, natural pauses, clear Arabic "
-                            "pronunciation, restrained emotion, steady volume."
+                            "Speak in natural, unmistakably Egyptian Arabic, "
+                            "but keep it broadly understandable across the Arab world: "
+                            "about 75% simple Egyptian colloquial phrasing and 25% "
+                            "clear shared pan-Arabic wording. Avoid heavy formal Arabic, "
+                            "obscure local slang, and complex vocabulary. Sound like a "
+                            "real Egyptian documentary storyteller speaking warmly to "
+                            "a friend: calm, confident, human, conversational, measured "
+                            "pace, natural pauses, clear pronunciation, gentle emphasis, "
+                            "restrained emotion, steady volume. Do not sound robotic, "
+                            "theatrical, or like a news announcer. Preserve any Quranic "
+                            "verse or exact religious quotation in its original correct "
+                            "Arabic pronunciation and wording; never colloquialize or alter it."
                         ),
                     }],
                 }],
