@@ -125,39 +125,18 @@ def commons_image(prompt, path):
 
 
 def get_image(prompt, path, n):
-    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt) + f"?width={W}&height={H}&nologo=true&seed={n}"
-    last_error = "unknown image service error"
-    for attempt in range(2):
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=90)
-            if response.ok and response.headers.get("content-type", "").startswith("image/"):
-                with open(path, "wb") as image_file:
-                    image_file.write(response.content)
-                with Image.open(path) as image:
-                    image.verify()
-                print(f"IMAGE_SOURCE=Pollinations; scene={n}")
-                return
-            last_error = f"HTTP {response.status_code}; content-type={response.headers.get('content-type', 'missing')}"
-            if response.status_code in (402, 401, 403, 404):
-                break
-        except requests.RequestException as exc:
-            last_error = str(exc)
-
-    print(f"Primary image provider unavailable for scene {n}: {last_error}. Trying Wikimedia Commons.")
+    # Prefer authentic, verifiable Commons media over synthetic or random images.
     try:
         if commons_image(prompt, path):
+            print(f"IMAGE_SOURCE=Wikimedia Commons; scene={n}")
             return
     except Exception as exc:
-        print(f"Wikimedia Commons fallback error for scene {n}: {exc}")
+        print(f"Wikimedia Commons lookup failed for scene {n}: {exc}")
 
-    keywords = re.sub(r"[^a-zA-Z0-9,]+", ",", prompt).strip(",")
-    fallback_url = f"https://loremflickr.com/{W}/{H}/{urllib.parse.quote(keywords)}"
-    try:
-        download_valid_image(fallback_url, path)
-        print(f"IMAGE_SOURCE=LoremFlickr fallback; scene={n}")
-        return
-    except Exception as exc:
-        raise RuntimeError(f"All image providers failed for scene {n}. Primary: {last_error}. Final fallback: {exc}") from exc
+    raise RuntimeError(
+        f"No suitable verified Wikimedia Commons image was found for scene {n}. "
+        "The renderer stopped instead of inserting an unrelated or visibly synthetic image."
+    )
 
 
 def overlay(path, text):
