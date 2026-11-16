@@ -18,6 +18,7 @@ GEMINI_TTS_VOICE = "Schedar"
 GEMINI_TTS_SAMPLE_RATE = 24000
 FONT = "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf"
 HEADERS = {"User-Agent": "ContentFactory/1.0 (https://github.com/m11nv-svg/Test-claude-test-)"}
+USED_IMAGE_TITLES = set()
 
 
 def run(cmd):
@@ -129,8 +130,11 @@ def commons_image(prompt, path):
             ranked_pages.append((score, title, image_url))
 
     for score, title, image_url in sorted(ranked_pages, reverse=True):
+        if title in USED_IMAGE_TITLES:
+            continue
         try:
             download_valid_image(image_url, path)
+            USED_IMAGE_TITLES.add(title)
             print(f"IMAGE_SOURCE=Wikimedia Commons; relevance_score={score}; file={title}")
             return True
         except Exception as exc:
@@ -319,10 +323,16 @@ def main(job_path, output_path):
             "BackColour=&H99000000,BorderStyle=3,Outline=1,"
             "Shadow=0,Alignment=2,MarginV=235,WrapStyle=2'"
         )
+        fade_out_start = max(0.0, audio_duration - 0.25)
+        video_filter = (
+            "zoompan=z='min(zoom+0.0008,1.15)':d=1:s=1080x1920:fps=30,"
+            f"fade=t=in:st=0:d=0.20,fade=t=out:st={fade_out_start:.3f}:d=0.20,"
+            f"{subtitle_filter}"
+        )
         run([
             "ffmpeg", "-y", "-loop", "1", "-i", image_path, "-i", audio_path,
             "-t", str(clip_duration),
-            "-vf", f"zoompan=z='min(zoom+0.0008,1.15)':d=1:s=1080x1920:fps=30,{subtitle_filter}",
+            "-vf", video_filter,
             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
             "-shortest", clip_path
