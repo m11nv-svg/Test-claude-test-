@@ -126,7 +126,7 @@ def main(job_path, output_path):
         clips.append(clip_path)
 
     with open("work/list.txt", "w", encoding="utf-8") as concat_file:
-        concat_file.write("".join(f"file '{os.path.abspath(clip)}'\\n" for clip in clips))
+        concat_file.write("".join(f"file '{os.path.abspath(clip)}'\n" for clip in clips))
 
     run([
         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
