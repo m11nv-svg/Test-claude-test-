@@ -66,6 +66,8 @@ jobs:
           PY
 
       - name: Render video
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python render/render.py job.json out/final.mp4
 
       - name: Verify MP4 output
