@@ -58,71 +58,84 @@ def download_valid_image(url, path):
 
 
 def commons_image(prompt, path):
-    stop = {"cinematic", "wide", "shot", "medium", "close", "dramatic", "vertical", "logos", "text", "image", "scene", "with", "from", "into", "above", "over", "under", "through", "that", "this", "their", "they", "standing", "looking", "ancient"}
-    words = re.findall(r"[A-Za-z]{4,}", prompt.lower())
+    # Search using meaningful noun phrases, then reject titles that do not
+    # contain at least two scene-specific keywords. Never use the first hit blindly.
+    stop = {
+        "cinematic", "wide", "shot", "medium", "close", "dramatic", "vertical",
+        "logos", "text", "image", "scene", "with", "from", "into", "above",
+        "over", "under", "through", "that", "this", "their", "they", "standing",
+        "looking", "ancient", "beautiful", "realistic", "historical", "detailed",
+        "photorealistic", "lighting", "camera", "view", "style"
+    }
+    words = re.findall(r"[A-Za-z]{3,}", prompt.lower())
     keywords = []
     for word in words:
         if word not in stop and word not in keywords:
             keywords.append(word)
+    if len(keywords) < 2:
+        raise RuntimeError(f"Scene image prompt is not specific enough: {prompt}")
 
     queries = []
-    if len(keywords) >= 2:
-        queries.extend([" ".join(keywords[:2]), " ".join(keywords[1:3])])
-    queries.extend(keywords[:8])
-    queries.extend(["ancient architecture", "desert landscape", "sandstorm", "oasis"])
-    seen = set()
+    for index in range(min(len(keywords) - 1, 7)):
+        queries.append(" ".join(keywords[index:index + 2]))
+    queries.append(" ".join(keywords[:min(5, len(keywords))]))
 
-    for query in queries:
-        query = query.strip()
-        if not query or query in seen:
-            continue
-        seen.add(query)
+    candidates = {}
+    for query in dict.fromkeys(queries):
         search_params = {
-            "action": "query",
-            "list": "search",
-            "srsearch": query,
-            "srnamespace": 6,
-            "srlimit": 15,
-            "format": "json",
+            "action": "query", "list": "search", "srsearch": query,
+            "srnamespace": 6, "srlimit": 30, "format": "json",
         }
-        search_response = requests.get(
+        response = requests.get(
             "https://commons.wikimedia.org/w/api.php",
             params=search_params, headers=HEADERS, timeout=45
         )
-        search_response.raise_for_status()
-        titles = [item.get("title") for item in search_response.json().get("query", {}).get("search", []) if item.get("title")]
-        if not titles:
+        response.raise_for_status()
+        for item in response.json().get("query", {}).get("search", []):
+            title = item.get("title", "")
+            title_words = set(re.findall(r"[a-z]{3,}", title.lower()))
+            overlap = title_words.intersection(keywords)
+            # A result must identify the actual subject, not just be returned
+            # by a broad or noisy search.
+            if len(overlap) >= 2:
+                candidates[title] = max(candidates.get(title, 0), len(overlap))
+
+    if not candidates:
+        print(f"NO_RELEVANT_COMMONS_IMAGE prompt={prompt}")
+        return False
+
+    ranked = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))
+    titles = [title for title, _score in ranked[:20]]
+    info_params = {
+        "action": "query", "titles": "|".join(titles),
+        "prop": "imageinfo", "iiprop": "url|mime",
+        "iiurlwidth": W, "format": "json",
+    }
+    info_response = requests.get(
+        "https://commons.wikimedia.org/w/api.php",
+        params=info_params, headers=HEADERS, timeout=45
+    )
+    info_response.raise_for_status()
+    pages = info_response.json().get("query", {}).get("pages", {})
+    ranked_pages = []
+    for page in pages.values():
+        info = (page.get("imageinfo") or [{}])[0]
+        if info.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
             continue
+        title = page.get("title", "")
+        score = candidates.get(title, 0)
+        image_url = info.get("thumburl") or info.get("url")
+        if image_url:
+            ranked_pages.append((score, title, image_url))
 
-        info_params = {
-            "action": "query",
-            "titles": "|".join(titles),
-            "prop": "imageinfo",
-            "iiprop": "url|mime",
-            "iiurlwidth": W,
-            "format": "json",
-        }
-        info_response = requests.get(
-            "https://commons.wikimedia.org/w/api.php",
-            params=info_params, headers=HEADERS, timeout=45
-        )
-        info_response.raise_for_status()
-        pages = info_response.json().get("query", {}).get("pages", {})
-        for page in pages.values():
-            info = (page.get("imageinfo") or [{}])[0]
-            if info.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
-                continue
-            image_url = info.get("thumburl") or info.get("url")
-            if not image_url:
-                continue
-            try:
-                download_valid_image(image_url, path)
-                print(f"IMAGE_SOURCE=Wikimedia Commons; query={query}; file={page.get('title', 'unknown')}")
-                return True
-            except Exception as exc:
-                print(f"Skipping Commons image {page.get('title', 'unknown')}: {exc}")
+    for score, title, image_url in sorted(ranked_pages, reverse=True):
+        try:
+            download_valid_image(image_url, path)
+            print(f"IMAGE_SOURCE=Wikimedia Commons; relevance_score={score}; file={title}")
+            return True
+        except Exception as exc:
+            print(f"Skipping Commons image {title}: {exc}")
     return False
-
 
 def get_image(prompt, path, n):
     # Prefer authentic, verifiable Commons media over synthetic or random images.
@@ -139,29 +152,55 @@ def get_image(prompt, path, n):
     )
 
 
-def overlay(path, text):
-    image = Image.open(path).convert("RGB").resize((W, H))
-    draw = ImageDraw.Draw(image, "RGBA")
-    font = ImageFont.truetype(FONT, 56)
-    words, lines, current = text.split(), [], ""
-    for word in words:
-        candidate = (current + " " + word).strip()
-        shaped = get_display(arabic_reshaper.reshape(candidate))
-        if draw.textlength(shaped, font=font) > W - 160 and current:
-            lines.append(current)
-            current = word
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    y = H - 160 - 80 * len(lines)
-    draw.rectangle([40, y - 30, W - 40, H - 150], fill=(0, 0, 0, 150))
-    for line in lines:
-        shaped = get_display(arabic_reshaper.reshape(line))
-        draw.text(((W - draw.textlength(shaped, font=font)) / 2, y), shaped, font=font, fill="white")
-        y += 80
-    image.save(path)
+def fit_image(path):
+    # Fill a 9:16 canvas without stretching the source image.
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+        scale = max(W / image.width, H / image.height)
+        resized = image.resize((int(image.width * scale), int(image.height * scale)), Image.Resampling.LANCZOS)
+        left = (resized.width - W) // 2
+        top = (resized.height - H) // 2
+        image = resized.crop((left, top, left + W, top + H))
+        image.save(path, quality=95)
 
+
+def srt_timestamp(seconds):
+    milliseconds = max(0, int(round(seconds * 1000)))
+    hours, milliseconds = divmod(milliseconds, 3600000)
+    minutes, milliseconds = divmod(milliseconds, 60000)
+    secs, milliseconds = divmod(milliseconds, 1000)
+    return f"{hours:02}:{minutes:02}:{secs:02},{milliseconds:03}"
+
+
+def write_scene_subtitles(text, audio_seconds, path):
+    # Short timed caption cards are much easier to read than a full paragraph
+    # burned onto every frame. Timing is proportionally distributed over the
+    # narration duration because the TTS endpoint does not return word timings.
+    words = text.split()
+    chunks, current = [], []
+    for word in words:
+        candidate = " ".join(current + [word])
+        if current and (len(candidate) > 34 or len(current) >= 5):
+            chunks.append(" ".join(current))
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        chunks.append(" ".join(current))
+    if not chunks:
+        raise ValueError("Cannot create subtitles for empty narration")
+
+    weights = [max(1, len(chunk.split())) for chunk in chunks]
+    total_weight = sum(weights)
+    cursor = 0.0
+    entries = []
+    for index, (chunk, weight) in enumerate(zip(chunks, weights), start=1):
+        start = cursor
+        end = audio_seconds if index == len(chunks) else cursor + audio_seconds * weight / total_weight
+        entries.append(f"{index}\n{srt_timestamp(start)} --> {srt_timestamp(end)}\n{chunk}\n")
+        cursor = end
+    with open(path, "w", encoding="utf-8-sig") as subtitle_file:
+        subtitle_file.write("\n".join(entries))
 
 def tts(text, path):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -261,16 +300,29 @@ def main(job_path, output_path):
         audio_path = f"work/{number}.wav"
         clip_path = f"work/{number}.mp4"
 
-        get_image(scene["image_prompt_en"], image_path, number)
-        overlay(image_path, scene["narration_ar"])
+        if not get_image(scene["image_prompt_en"], image_path, number):
+            raise RuntimeError(
+                f"No sufficiently relevant image found for scene {number}; "
+                "stopping rather than publishing an unrelated image."
+            )
+        fit_image(image_path)
         tts(scene["narration_ar"], audio_path)
 
         audio_duration = duration(audio_path)
+        subtitle_path = f"work/{number}.srt"
+        write_scene_subtitles(scene["narration_ar"], audio_duration, subtitle_path)
         clip_duration = audio_duration + 0.4
+        subtitle_filter = (
+            f"subtitles={subtitle_path}:force_style="
+            "'FontName=Noto Sans Arabic,FontSize=52,Bold=1,"
+            "PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,"
+            "BackColour=&H99000000,BorderStyle=3,Outline=1,"
+            "Shadow=0,Alignment=2,MarginV=235,WrapStyle=2'"
+        )
         run([
             "ffmpeg", "-y", "-loop", "1", "-i", image_path, "-i", audio_path,
             "-t", str(clip_duration),
-            "-vf", "zoompan=z='min(zoom+0.0008,1.15)':d=1:s=1080x1920:fps=30",
+            "-vf", f"zoompan=z='min(zoom+0.0008,1.15)':d=1:s=1080x1920:fps=30,{subtitle_filter}",
             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
             "-shortest", clip_path
