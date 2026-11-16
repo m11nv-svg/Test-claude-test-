@@ -1,0 +1,35 @@
+name: Render Video
+on:
+  repository_dispatch:
+    types: [render-video]
+  workflow_dispatch:
+    inputs:
+      job_json:
+        description: "JSON: {job_id, chat_id, title, scenes:[{n,narration_ar,image_prompt_en,seconds}]}"
+        required: true
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install deps
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-ui-core
+          pip install -r render/requirements.txt
+      - name: Write job file
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          INPUT: ${{ github.event.inputs.job_json }}
+        run: |
+          if [ -n "$INPUT" ]; then echo "$INPUT" > job.json; else echo "$PAYLOAD" > job.json; fi
+      - name: Render
+        run: python render/render.py job.json out/final.mp4
+      - uses: actions/upload-artifact@v4
+        with: { name: final-video, path: out/final.mp4, retention-days: 3 }
+      - name: Send result to Telegram
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python render/notify.py job.json out/final.mp4
