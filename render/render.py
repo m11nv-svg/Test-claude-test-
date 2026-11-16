@@ -14,6 +14,7 @@ from bidi.algorithm import get_display
 
 W, H = 1080, 1920
 GEMINI_TTS_MODEL = "gemini-3.8-flash-tts"
+GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
 GEMINI_TTS_VOICE = "Schedar"
 GEMINI_TTS_SAMPLE_RATE = 24000
 FONT = "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf"
@@ -58,102 +59,93 @@ def download_valid_image(url, path):
         image.verify()
 
 
-def commons_image(prompt, path):
-    # Search using meaningful noun phrases, then reject titles that do not
-    # contain at least two scene-specific keywords. Never use the first hit blindly.
-    stop = {
-        "cinematic", "wide", "shot", "medium", "close", "dramatic", "vertical",
-        "logos", "text", "image", "scene", "with", "from", "into", "above",
-        "over", "under", "through", "that", "this", "their", "they", "standing",
-        "looking", "ancient", "beautiful", "realistic", "historical", "detailed",
-        "photorealistic", "lighting", "camera", "view", "style"
-    }
-    words = re.findall(r"[A-Za-z]{3,}", prompt.lower())
-    keywords = []
-    for word in words:
-        if word not in stop and word not in keywords:
-            keywords.append(word)
-    if len(keywords) < 2:
-        raise RuntimeError(f"Scene image prompt is not specific enough: {prompt}")
+def generate_cartoon_image(prompt, path, n, style_reference=None):
+    """Generate a scene-matched 2D cartoon illustration with Gemini Image."""
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Missing GEMINI_API_KEY GitHub Actions secret.")
 
-    queries = []
-    for index in range(min(len(keywords) - 1, 7)):
-        queries.append(" ".join(keywords[index:index + 2]))
-    queries.append(" ".join(keywords[:min(5, len(keywords))]))
-
-    candidates = {}
-    for query in dict.fromkeys(queries):
-        search_params = {
-            "action": "query", "list": "search", "srsearch": query,
-            "srnamespace": 6, "srlimit": 30, "format": "json",
-        }
-        response = requests.get(
-            "https://commons.wikimedia.org/w/api.php",
-            params=search_params, headers=HEADERS, timeout=45
+    style = (
+        "Create one polished frame for a premium Arabic educational 2D animated short. "
+        "Visual language: clean hand-drawn flat cartoon illustration, expressive but "
+        "tasteful non-prophet characters, crisp dark-blue outlines, simplified readable "
+        "shapes, layered foreground/midground/background for parallax, rich deep navy "
+        "and cobalt-blue gradient atmosphere with restrained cyan and warm-gold accents, "
+        "soft cinematic rim light, subtle texture, strong visual hierarchy, beautiful "
+        "professional explainer-animation art direction. Vertical 9:16 composition. "
+        "The scene must depict the described event literally and clearly. No photorealism, "
+        "no stock-photo look, no random symbolic objects, no modern objects, no logos, "
+        "no lettering, no Arabic or English text. Never depict, silhouette, portray, or "
+        "show the face or body of any prophet; represent prophets only through environment, "
+        "objects, light, landscape, or other people who are explicitly not the prophet. "
+        "Maintain a coherent palette and illustration technique across every scene."
+    )
+    full_prompt = style + "\n\nSCENE DESCRIPTION:\n" + prompt
+    input_parts = [{"type": "text", "text": full_prompt}]
+    if style_reference and os.path.exists(style_reference):
+        with open(style_reference, "rb") as reference_file:
+            reference_data = base64.b64encode(reference_file.read()).decode("ascii")
+        input_parts.append({
+            "type": "image",
+            "data": reference_data,
+            "mime_type": "image/png",
+        })
+        input_parts[0]["text"] += (
+            "\n\nUse the supplied first-scene image strictly as a style and palette "
+            "reference. Do not copy its scene content or composition."
         )
-        response.raise_for_status()
-        for item in response.json().get("query", {}).get("search", []):
-            title = item.get("title", "")
-            title_words = set(re.findall(r"[a-z]{3,}", title.lower()))
-            overlap = title_words.intersection(keywords)
-            # A result must identify the actual subject, not just be returned
-            # by a broad or noisy search.
-            if len(overlap) >= 2:
-                candidates[title] = max(candidates.get(title, 0), len(overlap))
 
-    if not candidates:
-        print(f"NO_RELEVANT_COMMONS_IMAGE prompt={prompt}")
-        return False
-
-    ranked = sorted(candidates.items(), key=lambda item: (-item[1], item[0]))
-    titles = [title for title, _score in ranked[:20]]
-    info_params = {
-        "action": "query", "titles": "|".join(titles),
-        "prop": "imageinfo", "iiprop": "url|mime",
-        "iiurlwidth": W, "format": "json",
-    }
-    info_response = requests.get(
-        "https://commons.wikimedia.org/w/api.php",
-        params=info_params, headers=HEADERS, timeout=45
+    response = requests.post(
+        "https://generativelanguage.googleapis.com/v1beta/interactions",
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "model": GEMINI_IMAGE_MODEL,
+            "input": input_parts,
+            "response_format": {
+                "type": "image",
+                "aspect_ratio": "9:16",
+                "image_size": "1K",
+            },
+        },
+        timeout=300,
     )
-    info_response.raise_for_status()
-    pages = info_response.json().get("query", {}).get("pages", {})
-    ranked_pages = []
-    for page in pages.values():
-        info = (page.get("imageinfo") or [{}])[0]
-        if info.get("mime") not in ("image/jpeg", "image/png", "image/webp"):
-            continue
-        title = page.get("title", "")
-        score = candidates.get(title, 0)
-        image_url = info.get("thumburl") or info.get("url")
-        if image_url:
-            ranked_pages.append((score, title, image_url))
+    if not response.ok:
+        raise RuntimeError(
+            f"Gemini cartoon image generation failed for scene {n}: "
+            f"HTTP {response.status_code}: {response.text[:1200]}"
+        )
 
-    for score, title, image_url in sorted(ranked_pages, reverse=True):
-        if title in USED_IMAGE_TITLES:
-            continue
-        try:
-            download_valid_image(image_url, path)
-            USED_IMAGE_TITLES.add(title)
-            print(f"IMAGE_SOURCE=Wikimedia Commons; relevance_score={score}; file={title}")
-            return True
-        except Exception as exc:
-            print(f"Skipping Commons image {title}: {exc}")
-    return False
+    payload = response.json()
+    image_b64 = None
+    direct = payload.get("output_image")
+    if isinstance(direct, dict):
+        image_b64 = direct.get("data")
+    if not image_b64:
+        for step in reversed(payload.get("steps", [])):
+            if step.get("type") != "model_output":
+                continue
+            for part in reversed(step.get("content", [])):
+                if part.get("type") in ("image", "output_image") and part.get("data"):
+                    image_b64 = part["data"]
+                    break
+            if image_b64:
+                break
+    if not image_b64:
+        raise RuntimeError(
+            f"Gemini returned no image for scene {n}; response keys: {list(payload.keys())}"
+        )
 
-def get_image(prompt, path, n):
-    # Prefer authentic, verifiable Commons media over synthetic or random images.
-    try:
-        if commons_image(prompt, path):
-            print(f"IMAGE_SOURCE=Wikimedia Commons; scene={n}")
-            return
-    except Exception as exc:
-        print(f"Wikimedia Commons lookup failed for scene {n}: {exc}")
+    image_bytes = base64.b64decode(image_b64)
+    with open(path, "wb") as image_file:
+        image_file.write(image_bytes)
+    with Image.open(path) as generated:
+        generated.verify()
+    print(f"IMAGE_SOURCE=Gemini {GEMINI_IMAGE_MODEL}; scene={n}; style_reference={bool(style_reference)}")
+    return True
 
-    raise RuntimeError(
-        f"No suitable verified Wikimedia Commons image was found for scene {n}. "
-        "The renderer stopped instead of inserting an unrelated or visibly synthetic image."
-    )
+
+def get_image(prompt, path, n, style_reference=None):
+    return generate_cartoon_image(prompt, path, n, style_reference)
 
 
 def fit_image(path):
@@ -297,6 +289,7 @@ def main(job_path, output_path):
     os.makedirs("work", exist_ok=True)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     clips = []
+    style_reference = None
 
     for scene in job["scenes"]:
         number = scene["n"]
@@ -304,11 +297,13 @@ def main(job_path, output_path):
         audio_path = f"work/{number}.wav"
         clip_path = f"work/{number}.mp4"
 
-        if not get_image(scene["image_prompt_en"], image_path, number):
+        if not get_image(scene["image_prompt_en"], image_path, number, style_reference):
             raise RuntimeError(
                 f"No sufficiently relevant image found for scene {number}; "
                 "stopping rather than publishing an unrelated image."
             )
+        if style_reference is None:
+            style_reference = image_path
         fit_image(image_path)
         tts(scene["narration_ar"], audio_path)
 
